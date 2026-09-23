@@ -1,0 +1,17 @@
+# 文件索引 / RAG 桌面软件依赖（窗口版，轻量 fastembed 方案）
+# 说明：请使用 Python >= 3.10 安装
+numpy>=1.24.0
+psutil>=5.9.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+openai>=1.40.0
+fastembed>=0.8.0
+# fastembed 0.8.0 不兼容 huggingface_hub 1.x（下载报 'NoneType' object has no attribute 'write'）
+huggingface_hub<1.0.0
+PySide6>=6.5.0
+# 向量检索：索引量大时必需（缺了读不到 index.faiss，检索也会慢到不可用）
+faiss-cpu>=1.8.0
+pillow>=10.0.0
+# 注意：onnxruntime 由 install.py 按硬件自动选择安装：
+#   - 有 NVIDIA GPU：onnxruntime-gpu（CUDA 12 版，需驱动>=550 + CUDA 12.x 库 + cuDNN 9）
+#   - 无 GPU：onnxruntime（CPU 版）
