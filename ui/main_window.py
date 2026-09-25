@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from shiboken6 import isValid as _qt_alive   # noqa: E402  判断 C++ 侧是否已销毁
 from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence
 from PySide6.QtWidgets import (
@@ -251,6 +251,37 @@ class RowFrame(QFrame):
         super().mousePressEvent(event)
 
 
+class _ImePlaceholder(QObject):
+    """拼音没上屏时把占位符摘掉。
+
+    Qt 把未提交的 preedit 存在控件的文本外面（`toPlainText()` / `text()` 仍是空），
+    于是「文本为空才画占位符」的判断漏掉了组合中的那串字母，
+    占位符和拼音叠在同一行上看不清在打什么。"""
+
+    def __init__(self, widget, text: str):
+        super().__init__(widget)
+        self._w = widget
+        self._text = text
+
+    def _empty(self) -> bool:
+        read = getattr(self._w, "toPlainText", None)
+        return not (read() if read is not None else self._w.text())
+
+    def eventFilter(self, obj, ev):  # noqa: ANN001
+        if obj is self._w and ev.type() == QEvent.Type.InputMethod:
+            if ev.preeditString():
+                self._w.setPlaceholderText("")
+            elif self._empty():
+                self._w.setPlaceholderText(self._text)
+        return False
+
+
+def set_placeholder(widget, text: str) -> None:
+    """带占位符的输入框一律走这里：组合期间自动让位给拼音。"""
+    widget.setPlaceholderText(text)
+    widget.installEventFilter(_ImePlaceholder(widget, text))
+
+
 class ChatInputEdit(QPlainTextEdit):
     """聊天输入框：Enter 发送、Shift+Enter 换行，随内容 1~6 行自动增高。"""
 
@@ -258,7 +289,7 @@ class ChatInputEdit(QPlainTextEdit):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setPlaceholderText("向 RAG 助手提问（Enter 发送，Shift+Enter 换行）；点左侧知识库文件可插入 @引用…")
+        set_placeholder(self, "向 RAG 助手提问（Enter 发送，Shift+Enter 换行）；点左侧知识库文件可插入 @引用…")
         self.setObjectName("ChatInput")
         self.setFixedHeight(44)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -558,7 +589,7 @@ class RenameDialog(QDialog):
         root.addWidget(title)
 
         self.edit = QLineEdit(current)
-        self.edit.setPlaceholderText("输入新名称…")
+        set_placeholder(self.edit, "输入新名称…")
         self.edit.setClearButtonEnabled(True)
         self.edit.selectAll()
         root.addWidget(self.edit)
@@ -998,7 +1029,7 @@ class MainWindow(QMainWindow):
         header.addWidget(self.note_status)
         rl.addLayout(header)
         self.note_editor = QPlainTextEdit()
-        self.note_editor.setPlaceholderText("在这里写笔记，支持 Markdown 纯文本…")
+        set_placeholder(self.note_editor, "在这里写笔记，支持 Markdown 纯文本…")
         self.note_editor.textChanged.connect(self._note_dirty)
         rl.addWidget(self.note_editor, 1)
         lay.addWidget(right, 1)
@@ -1036,7 +1067,7 @@ class MainWindow(QMainWindow):
         search_row = QHBoxLayout()
         search_row.setSpacing(8)
         self.find_entry = QLineEdit()
-        self.find_entry.setPlaceholderText("输入文件名或内容关键字，边输入边搜（回车立即搜）…")
+        set_placeholder(self.find_entry, "输入文件名或内容关键字，边输入边搜（回车立即搜）…")
         self.find_entry.setClearButtonEnabled(True)
         self.find_entry.returnPressed.connect(lambda: self._do_find(force=True))
         self.find_entry.textChanged.connect(self._find_debounce)
@@ -1300,7 +1331,7 @@ class MainWindow(QMainWindow):
               "列表里没有的模型：先在「模型部署」页下载，或直接在服务地址里填自定义端点")
 
         self.base_edit = QLineEdit(cfg.get("chat_base_url", ""))
-        self.base_edit.setPlaceholderText("留空即可：本地 Ollama 用 localhost:11434")
+        set_placeholder(self.base_edit, "留空即可：本地 Ollama 用 localhost:11434")
         self.base_edit.textChanged.connect(self._save_settings)
         field(f2, "服务地址", self.base_edit, "云端：自定义 API 地址；本地 Ollama：留空用默认端口")
 
@@ -1310,7 +1341,7 @@ class MainWindow(QMainWindow):
         kr.setSpacing(6)
         self.key_edit = QLineEdit(cfg.get("chat_api_key", ""))
         self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.key_edit.setPlaceholderText("仅使用云端 API 时需要")
+        set_placeholder(self.key_edit, "仅使用云端 API 时需要")
         self.key_edit.textChanged.connect(self._save_settings)
         self.key_reveal = QCheckBox("显示")
         self.key_reveal.toggled.connect(
@@ -1422,7 +1453,7 @@ class MainWindow(QMainWindow):
 
         # 搜索
         self.file_search = QLineEdit()
-        self.file_search.setPlaceholderText("搜索文件名…")
+        set_placeholder(self.file_search, "搜索文件名…")
         self.file_search.setClearButtonEnabled(True)
         lay.addWidget(self.file_search)
 
@@ -1838,8 +1869,11 @@ class MainWindow(QMainWindow):
                     pass
                 self.later(lambda: self._end_answer(block, conv, "", hits,
                                                     stopped=self._stop_event.is_set()))
-            except Exception as e:
-                self.later(lambda: self._end_answer(block, conv, self._friendly_chat_error(e), None))
+            except Exception as exc:
+                # `except ... as e` 在块尾会删掉 e，而 self.later 是延后执行的 ——
+                # 直接闭包引用它会在真正跑起来时报 NameError，等于把错误提示换成崩溃。
+                self.later(lambda exc=exc: self._end_answer(
+                    block, conv, self._friendly_chat_error(exc), None))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3606,9 +3640,6 @@ class MainWindow(QMainWindow):
             # LifeSystem 检测到窗口隐藏（IsWindowVisible=False）会自动重新内嵌。
             event.ignore()
             self.hide()
-            self.tray.showMessage("RAG 文件助手仍在运行",
-                                  "已收进托盘，点托盘图标可重新打开；右键托盘图标选「退出」才是真正关闭。",
-                                  QSystemTrayIcon.MessageIcon.Information, 4000)
             return
         event.accept()
 
